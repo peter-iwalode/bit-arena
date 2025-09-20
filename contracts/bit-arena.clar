@@ -149,3 +149,162 @@
     (ok token-id)
   )
 )
+
+(define-public (transfer-game-asset 
+  (token-id uint) 
+  (recipient principal)
+)
+  (begin
+    (asserts! 
+      (is-eq tx-sender (unwrap! (nft-get-owner? game-asset token-id) ERR-INVALID-GAME-ASSET))
+      ERR-NOT-AUTHORIZED
+    )
+    
+    (asserts! (is-safe-principal recipient) ERR-INVALID-INPUT)
+    
+    (nft-transfer? game-asset token-id tx-sender recipient)
+  )
+)
+
+;; PLAYER MANAGEMENT
+
+(define-public (register-player)
+  (let 
+    (
+      (registration-fee (var-get game-fee))
+    )
+    (asserts! 
+      (>= (stx-get-balance tx-sender) registration-fee) 
+      ERR-INSUFFICIENT-FUNDS
+    )
+    
+    (asserts! 
+      (is-none (map-get? leaderboard { player: tx-sender }))
+      ERR-ALREADY-REGISTERED
+    )
+    
+    (try! (stx-transfer? registration-fee tx-sender (as-contract tx-sender)))
+    
+    (map-set leaderboard 
+      { player: tx-sender }
+      {
+        score: u0,
+        games-played: u0,
+        total-rewards: u0
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (update-player-score 
+  (player principal) 
+  (new-score uint)
+)
+  (let 
+    (
+      (current-stats (unwrap! 
+        (map-get? leaderboard { player: player }) 
+        ERR-PLAYER-NOT-FOUND
+      ))
+    )
+    (asserts! (is-game-admin tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (is-safe-principal player) ERR-INVALID-INPUT)
+    (asserts! (and (>= new-score u0) (<= new-score u10000)) ERR-INVALID-SCORE)
+    
+    (map-set leaderboard 
+      { player: player }
+      (merge current-stats 
+        {
+          score: new-score,
+          games-played: (+ (get games-played current-stats) u1)
+        }
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+;; REWARD DISTRIBUTION SYSTEM
+
+(define-public (distribute-bitcoin-rewards)
+  (let 
+    (
+      (top-players (get-top-players))
+    )
+    (asserts! (is-game-admin tx-sender) ERR-NOT-AUTHORIZED)
+    
+    (try! 
+      (fold distribute-reward 
+        (filter is-valid-reward-candidate top-players) 
+        (ok true)
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+(define-private (is-valid-reward-candidate (player principal))
+  (match (map-get? leaderboard { player: player })
+    stats (and 
+            (> (get score stats) u0)
+            (is-safe-principal player)
+          )
+    false
+  )
+)
+
+(define-private (distribute-reward 
+  (player principal) 
+  (previous-result (response bool uint))
+)
+  (match (map-get? leaderboard { player: player })
+    player-stats 
+      (let 
+        (
+          (reward-amount (calculate-reward (get score player-stats)))
+        )
+        (if (and (is-ok previous-result) (> reward-amount u0))
+          (begin
+            (map-set leaderboard 
+              { player: player }
+              (merge player-stats 
+                { total-rewards: (+ (get total-rewards player-stats) reward-amount) }
+              )
+            )
+            (ok true)
+          )
+          previous-result
+        )
+      )
+    previous-result
+  )
+)
+
+(define-private (calculate-reward (score uint))
+  (if (and (> score u100) (<= score u10000))
+    (* score u10)
+    u0
+  )
+)
+
+;; LEADERBOARD QUERIES
+
+(define-read-only (get-top-players)
+  (let 
+    (
+      (max-entries (var-get max-leaderboard-entries))
+    )
+    (list 
+      tx-sender
+    )
+  )
+)
+
+;; PROTOCOL INITIALIZATION
+
+;; Set contract deployer as initial admin
+(map-set game-admin-whitelist tx-sender true)
